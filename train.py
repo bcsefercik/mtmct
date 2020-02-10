@@ -148,7 +148,7 @@ def main(args):
     # return
     dataset = None
 
-    with open(args.output, 'rb') as f:
+    with open(args.dataset, 'rb') as f:
         dataset = pickle.load(f)
 
     ####### DATASET KEYS
@@ -297,7 +297,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='GAT')
 
-    parser.add_argument("--dataset", type=str, default='.')
+    parser.add_argument("--dataset", type=str, default='dataset.pickle')
     parser.add_argument("--output", type=str, default='dataset.pickle')
     parser.add_argument("--datafile", type=str, default='.')
     parser.add_argument("--cams", type=int, nargs='+', default=[1, 8])

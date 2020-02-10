@@ -19,6 +19,8 @@ MARGIN_INTRA = 600
 MARGIN_INTER = 6000
 GRAPH_SIZE = 4
 
+
+# Used for creating datafile from tacklet records, for once.
 def load_data(args):
     frame_width = 1920
     frame_height = 1080
@@ -121,9 +123,6 @@ def load_data(args):
     return output_data
 
 
-
-
-
 def accuracy(logits, labels):
     _, indices = torch.max(logits, dim=1)
     correct = torch.sum(indices == labels)
@@ -152,7 +151,12 @@ def main(args):
     with open(args.output, 'rb') as f:
         dataset = pickle.load(f)
 
-    dataset['set_ids'] = dataset['set_ids']
+    ####### DATASET KEYS
+    # 'labels': 1/-1,
+    # 'set_ids': shuffled ids,
+    # 'graphs': graphs
+    # 'graph_data': graph node features
+    # 'tracklet_features': tracklet_features
 
 
     training_set_limit = int(len(dataset['set_ids'])*0.9)
@@ -226,10 +230,10 @@ def main(args):
     if cuda:
         model.cuda()
 
-    # loss_func = torch.nn.CrossEntropyLoss()
     loss_func = torch.nn.SoftMarginLoss()
 
     # loss_func = torch.nn.MultiMarginLoss()
+    # loss_func = torch.nn.CrossEntropyLoss()
 
     # pdb.set_trace()
 
@@ -294,7 +298,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='GAT')
 
     parser.add_argument("--dataset", type=str, default='.')
-    parser.add_argument("--output", type=str, default='out_graph.pickle')
+    parser.add_argument("--output", type=str, default='dataset.pickle')
     parser.add_argument("--datafile", type=str, default='.')
     parser.add_argument("--cams", type=int, nargs='+', default=[1, 8])
 

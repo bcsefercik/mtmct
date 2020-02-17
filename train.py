@@ -2,23 +2,31 @@ import os
 import pdb
 import random
 import pickle
-
+from collections import namedtuple
 import argparse
+
 import numpy as np
 import networkx as nx
 import time
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
+
 from dgl import DGLGraph
 from model import BCS
 from utils import EarlyStopping
 
+from dgl.data import SSTBatch
+import dgl
 torch.set_printoptions(threshold=5000)
 
 MARGIN_INTRA = 600
 MARGIN_INTER = 6000
 GRAPH_SIZE = 4
 
+BATCH_SIZE = 500
+
+BCSBatch = namedtuple('BCSBatch', ['graph'])
 
 # Used for creating datafile from tacklet records, for once.
 def load_data(args):
@@ -124,21 +132,26 @@ def load_data(args):
 
 
 def accuracy(logits, labels):
-    _, indices = torch.max(logits, dim=1)
-    correct = torch.sum(indices == labels)
+    pred = torch.BoolTensor(logits>0)
+    gold = torch.BoolTensor(labels>0)
+    correct = torch.sum(pred == gold)
     return correct.item() * 1.0 / len(labels)
 
 
-def evaluate(model, features, labels, mask):
+def evaluate(model, labels, batch, node_features, tracklet_features):
     model.eval()
     with torch.no_grad():
-        logits = model(features)
-        logits = logits[mask]
-        labels = labels[mask]
+        logits = model(batch, node_features, tracklet_features)
         return accuracy(logits, labels)
 
+def batcher(dev):
+    def batcher_dev(batch):
+        batch_trees = dgl.batch(batch)
+        return BCSBatch(graph=batch_trees)
+    return batcher_dev
 
 def main(args):
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     with open("output.txt", "a") as fp:
         fp.write(str(args))
@@ -160,70 +173,75 @@ def main(args):
 
 
     training_set_limit = int(len(dataset['set_ids'])*0.9)
+
     training_graph_data = []
     training_tracklet_data = []
-    training_x = []
+    training_graphs = []
     training_labels = []
+
     test_graph_data = []
     test_tracklet_data = []
+    test_graphs = []
     test_labels = []
 
     for i in dataset['set_ids'][:training_set_limit]:
+        training_graphs.append(dataset['graphs'][i])
         training_graph_data.append(dataset['graph_data'][i])
         training_tracklet_data.append(dataset['tracklet_features'][i])
-        training_x.append(dataset['x'][i])
         training_labels.append(dataset['labels'][i])
 
     for i in dataset['set_ids'][training_set_limit:]:
         test_graph_data.append(dataset['graph_data'][i])
         test_tracklet_data.append(dataset['tracklet_features'][i])
-        # test_x.append(dataset['x'][i])
+        test_graphs.append(dataset['graphs'][i])
         test_labels.append(dataset['labels'][i])
 
-    training_labels = torch.LongTensor(training_labels)
-    test_labels = torch.LongTensor(test_labels)
+    training_labels = torch.FloatTensor(training_labels)
     training_graph_data = torch.FloatTensor(training_graph_data)
     training_tracklet_data = torch.FloatTensor(training_tracklet_data)
+    test_labels = torch.FloatTensor(test_labels)
+    test_graph_data = torch.FloatTensor(test_graph_data)
+    test_tracklet_data = torch.FloatTensor(test_tracklet_data)
+    
 
-    torch.cuda.empty_cache()
-    # features = torch.FloatTensor(features)
-    # labels = torch.LongTensor(labels)
-    # if hasattr(torch, 'BoolTensor'):
-    #     train_mask = torch.BoolTensor(train_mask)
-    #     val_mask = torch.BoolTensor(val_mask)
-    #     test_mask = torch.BoolTensor(test_mask)
-    # else:
-    #     train_mask = torch.ByteTensor(train_mask)
-    #     val_mask = torch.ByteTensor(val_mask)
-    #     test_mask = torch.ByteTensor(test_mask)
-    # num_feats = features.shape[1]
-    # n_classes = num_labels
-    # n_edges = g.number_of_edges()
-    # print("""----Data statistics------'
-    #   #Edges %d
-    #   #Classes %d 
-    #   #Train samples %d
-    #   #Val samples %d
-    #   #Test samples %d""" %
-    #       (n_edges, n_classes,
-    #        train_mask.int().sum().item(),
-    #        val_mask.int().sum().item(),
-    #        test_labels.int().sum().item()))
+    train_loader = DataLoader(
+        dataset=training_graphs,
+        batch_size=BATCH_SIZE,
+        collate_fn=batcher(device),
+        shuffle=False,
+        num_workers=0
+    )
+
+    test_loader = DataLoader(
+        dataset=test_graphs,
+        batch_size=BATCH_SIZE,
+        collate_fn=batcher(device),
+        shuffle=False,
+        num_workers=0
+    )
+
+
 
     if args.gpu < 0:
         cuda = False
     else:
+        torch.cuda.empty_cache()
         cuda = True
         torch.cuda.set_device(args.gpu)
+        # training_graphs = training_graphs.cuda()
         training_graph_data = training_graph_data.cuda()
         training_tracklet_data = training_tracklet_data.cuda()
         training_labels = training_labels.cuda()
-        test_labels = test_labels.cuda()
-    # create model
-    
-    model = BCS(g=training_x[0][0])
-    model(training_graph_data[:2], training_tracklet_data[:2])
 
+        # test_graphs = test_graphs.cuda()
+        test_graph_data = test_graph_data.cuda()
+        test_tracklet_data = test_tracklet_data.cuda()
+        test_labels = test_labels.cuda()
+    
+    # create model
+
+    # model = BCS()
+    model = torch.load("model.pt")
 
     if args.early_stop:
         stopper = EarlyStopping(patience=100)
@@ -231,35 +249,73 @@ def main(args):
         model.cuda()
 
     loss_func = torch.nn.SoftMarginLoss()
-
     # loss_func = torch.nn.MultiMarginLoss()
     # loss_func = torch.nn.CrossEntropyLoss()
 
-    # pdb.set_trace()
-
-    # use optimizer
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    # initialize graph
     dur = []
+    loss_values = []
+    training_accuracy = []
+    test_accuracy = []
     for epoch in range(args.epochs):
+        training_accuracy.append([])
+        test_accuracy.append([])
+        loss_values.append([])
+        total_count = 0
+        # print(len(training_graphs), len(training_graph_data), len(training_tracklet_data))
+
         model.train()
         if epoch >= 3:
             t0 = time.time()
         # forward
-        logits = model(training_x)
 
-        loss = loss_func(logits, training_labels)
+        for step, batch in enumerate(train_loader):
+            if len(training_graphs) < (step+1)*BATCH_SIZE:
+                continue
+            node_features = training_graph_data[step*BATCH_SIZE:min(len(training_graphs), (step+1)*BATCH_SIZE), :]
+            tracklet_features = training_tracklet_data[step*BATCH_SIZE:min(len(training_graphs), (step+1)*BATCH_SIZE), :]
+            logits = model(batch, node_features, tracklet_features)
+            loss = loss_func(logits, training_labels[step*BATCH_SIZE:min(len(training_graphs), (step+1)*BATCH_SIZE)])
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            training_accuracy[epoch].append(
+                accuracy(logits, training_labels[step*BATCH_SIZE:min(len(training_graphs), (step+1)*BATCH_SIZE)]))
+            loss_values[epoch].append(loss.item())
+
+            log_str = "Epoch {:05d} | Batch {:05d} | Loss {:.4f} | Acc {:.4f}\n".format(
+                        epoch, 
+                        step, 
+                        loss_values[epoch][-1], 
+                        training_accuracy[epoch][-1], 
+                    )
+
+            print(log_str.strip())
+            with open("output.txt", "a") as fp:
+                fp.write(log_str)
+
+        for step, batch in enumerate(test_loader):
+            if len(test_graphs) < (step+1)*BATCH_SIZE:
+                continue
+            node_features = test_graph_data[step*BATCH_SIZE:min(len(test_graphs), (step+1)*BATCH_SIZE), :]
+            tracklet_features = test_tracklet_data[step*BATCH_SIZE:min(len(test_graphs), (step+1)*BATCH_SIZE), :]
+            
+            test_accuracy[epoch].append(evaluate(
+                model, 
+                test_labels[step*BATCH_SIZE:min(len(test_graphs), (step+1)*BATCH_SIZE)],
+                batch,
+                node_features,
+                tracklet_features
+            ))
+
 
         if epoch >= 3:
             dur.append(time.time() - t0)
-        print(loss.item())
-        # train_acc = accuracy(logits[train_mask], labels[train_mask])
+
 
         # if args.fastmode:
         #     val_acc = accuracy(logits[val_mask], labels[val_mask])
@@ -269,28 +325,32 @@ def main(args):
         #         if stopper.step(val_acc, model):   
         #             break
 
+        train_acc = np.mean(training_accuracy[epoch])
+        test_acc = np.mean(test_accuracy[epoch])
+
+        print(train_acc, test_acc)
+
         if epoch%15 == 0:
             torch.save(model, "model.pt")
 
-        # print("Epoch {:05d} | Time(s) {:.4f} | Loss {:.4f} | TrainAcc {:.4f} |"
-        #       " ValAcc {:.4f} | ETputs(KTEPS) {:.2f}".
-        #       format(epoch, np.mean(dur), loss.item(), train_acc,
-        #              val_acc, n_edges / np.mean(dur) / 1000))
+        log_str = "Epoch {:05d} | Time(s) {:.4f} | Loss {:.4f} | TrainAcc {:.4f} | TestAcc {:.4f}\n".format(
+            epoch, 
+            np.mean(dur), 
+            float(np.mean(loss_values[epoch])), 
+            float(train_acc), 
+            float(test_acc)
+        )
 
-        # with open("output.txt", "a") as fp:
-        #     fp.write("Epoch {:05d} | Time(s) {:.4f} | Loss {:.4f} | TrainAcc {:.4f} |"
-        #       " ValAcc {:.4f} | ETputs(KTEPS) {:.2f}\n".
-        #       format(epoch, np.mean(dur), loss.item(), train_acc,
-        #              val_acc, n_edges / np.mean(dur) / 1000))
+        print(log_str)
+
+        with open("output.txt", "a") as fp:
+            fp.write(log_str)
 
     print()
     if args.early_stop:
         model.load_state_dict(torch.load('es_checkpoint.pt'))
 
-    
 
-    acc = evaluate(model, features, labels, test_mask)
-    print("Test Accuracy {:.4f}".format(acc))
 
 
 if __name__ == '__main__':

@@ -1,0 +1,52 @@
+function updateTrackletManager(detections, features){
+    //  Creates and updates tracklets people with detections and appearence features
+    //  using iou and cosine distance.
+    //  Returns finished tracklets satisfying end conditions
+}     
+
+!!! persons = tracks containing tracklet graphs !!! 
+
+function updatePersonManager(tracklets){
+    //  PersonManager creates, removes and updates Persons.
+    //  Person contains graphs, graph features and frame information.
+    persons = []
+    
+    if persons empty:
+        create a person for each tracklet
+    else:
+
+        create score matrix by computing scores for each tracklet-person pair
+
+        for each tracklet:
+            if all person scores are below certain threshold:
+                remove tracklet row from the matrix
+                create a new person fZor the tracklet
+
+        do bipartite matching using Hungarian algo.
+        update each person (track) with matched tracklet features
+
+        create new person for each unmatched tracklet
+
+        remove persons (tracks) that have not been updated for a while
+
+    return persons
+}
+
+
+//  Main code
+TrackletManager
+PersonManager
+
+while frame_id is less than or equal to end_frame_id {
+    
+    for each camera {
+        detections, features <- read from files
+
+        finished_tracklets <- updateTrackletManager(detections, features)
+
+        person_ids <- updatePersonManager(finished_tracklets)
+
+        write frame_id, person_ids, cam_ids, bboxes to result file 
+    }
+
+}

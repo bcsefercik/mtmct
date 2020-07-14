@@ -6,9 +6,6 @@ import argparse
 import numpy as np
 import pickle
 
-MARGIN_INTRA = 600
-MARGIN_INTER = 6000
-
 
 def load_data(args):
     generic_filename = args.generic
@@ -42,18 +39,18 @@ def load_data(args):
                 start = int(parts[3])
                 end = int(parts[4])
 
-                if tracklet_length > 4:
+                if tracklet_length > 2:
                     bbox = list(map(float, parts[5].strip('][').split(', ')))
                     bbox[0] /= frame_width
                     bbox[1] /= frame_height
                     bbox[2] /= frame_width
                     bbox[3] /= frame_height
 
-                    appearence = list(map(float, parts[-1].strip('][').split(', ')))
+                    appearance = list(map(float, parts[-1].strip('][').split(', ')))
 
-                    # feature_vector.extend(cam_vector)
-                    # feature_vector.extend(bbox)
-                    feature_vector.extend(appearence)
+                    feature_vector.extend(cam_vector)
+                    feature_vector.extend(bbox)
+                    feature_vector.extend(appearance)
 
                     if pid not in data:
                         data[pid] = []
@@ -77,7 +74,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='DataLoader')
 
     parser.add_argument("--dataset", type=str, default='.')
-    parser.add_argument("--generic", type=str, default='tl150_iou0.75_d0.3_features.txt')
+    parser.add_argument("--generic", type=str, default='tl10_iou0.75_d0.4_features.txt')
     parser.add_argument("--cams", type=int, nargs='+', default=[1, 8])
     parser.add_argument("--output", type=str, default='dataset.pickle')
     args = parser.parse_args()

@@ -22,9 +22,9 @@ torch.set_printoptions(threshold=5000)
 
 MARGIN_INTRA = 600
 MARGIN_INTER = 6000
-GRAPH_SIZE = 4
+GRAPH_SIZE = 12
 
-BATCH_SIZE = 500
+BATCH_SIZE = 300
 
 BCSBatch = namedtuple('BCSBatch', ['graph'])
 
@@ -45,6 +45,7 @@ def load_data(args):
     graph_data = []
     tracklet_features = []
     labels = []
+    graph_nodes = []
 
     for k in data:
         if len(data[k]) > GRAPH_SIZE:
@@ -52,11 +53,17 @@ def load_data(args):
 
             for i1 in range(len(data[k]) - GRAPH_SIZE):
                 g = nx.DiGraph()
+                g_nodes = []
                 graph_features = [None] * GRAPH_SIZE
                 graph_features[0] = features[data[k][i1]['feature_id']]
 
                 for i in range(GRAPH_SIZE):
                     g.add_node(i)
+
+                # for i in range(GRAPH_SIZE):
+                #     for j in range(GRAPH_SIZE):
+                #         g.add_edge(i, j)
+                #         g.add_edge(j, i)
 
                 for i2 in range(i1+1, i1+GRAPH_SIZE):
                     ii = i2 - i1
@@ -82,6 +89,9 @@ def load_data(args):
                             if time_diff < MARGIN_INTRA:
                                 g.add_edge(iii, ii)
                                 g.add_edge(ii, iii)
+
+                        g_nodes.append(data[k][i2]['cam'])
+                        g_nodes.append(data[k][i3]['cam'])
 
                 g.remove_edges_from(nx.selfloop_edges(g))
                 g = DGLGraph(g)
@@ -112,31 +122,53 @@ def load_data(args):
                 tracklet_features.append(negative_features)
                 labels.append(-1)
 
+                graph_nodes.append(g_nodes)
+
+    # return graph_nodes
+    # pdb.set_trace()
+
 
     set_ids = list(range(len(labels)))
     random.shuffle(set_ids)
 
-    output_data = {
-        'x': x,
-        'labels': torch.LongTensor(labels),
-        'set_ids': set_ids,
-        'graphs': graphs,
-        'graph_data': graph_data,
-        'tracklet_features': tracklet_features
+    training_set_limit = int(len(set_ids)*0.9)
+
+    training_output_data = {
+        'x': x[:training_set_limit],
+        'labels': torch.LongTensor(labels[:training_set_limit]),
+        'set_ids': set_ids[:training_set_limit],
+        'graphs': graphs[:training_set_limit],
+        'graph_data': graph_data[:training_set_limit],
+        'tracklet_features': tracklet_features[:training_set_limit]
     }
 
-    with open(args.output, 'wb') as f:
-        pickle.dump(output_data, f, pickle.HIGHEST_PROTOCOL)
+    val_output_data = {
+        'x': x[training_set_limit:],
+        'labels': torch.LongTensor(labels[training_set_limit:]),
+        'set_ids': set_ids[training_set_limit:],
+        'graphs': graphs[training_set_limit:],
+        'graph_data': graph_data[training_set_limit:],
+        'tracklet_features': tracklet_features[training_set_limit:]
+    }
 
-    return output_data
+    with open(args.trainingdataset, 'wb') as f:
+        pickle.dump(training_output_data, f, pickle.HIGHEST_PROTOCOL)
+
+    with open(args.valdataset, 'wb') as f:
+        pickle.dump(val_output_data, f, pickle.HIGHEST_PROTOCOL)
+
+    return training_output_data, val_output_data
 
 
 def accuracy(logits, labels):
-    pred = torch.BoolTensor(logits>0)
-    gold = torch.BoolTensor(labels>0)
+    # pdb.set_trace()
+    # pred = torch.BoolTensor(logits>0).cuda()
+    # gold = torch.BoolTensor(labels>0).cuda()
+    pred = logits>0
+    gold = labels>0
     correct = torch.sum(pred == gold)
     return correct.item() * 1.0 / len(labels)
-
+    # return 1.0
 
 def evaluate(model, labels, batch, node_features, tracklet_features):
     model.eval()
@@ -146,23 +178,45 @@ def evaluate(model, labels, batch, node_features, tracklet_features):
 
 def batcher(dev):
     def batcher_dev(batch):
+        # pdb.set_trace()
         batch_trees = dgl.batch(batch)
         return BCSBatch(graph=batch_trees)
     return batcher_dev
 
 def main(args):
+    best_val_acc = 0
+    dataset_name = args.trainingdataset.split("_training.pickle")[0]
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    
+    # graph_nodes = load_data(args)
+    # graph_sets = [None]*len(graph_nodes)
+    # for i, v in enumerate(graph_nodes):
+    #     graph_sets[i] = set(v)
+    
+    # set_lengths = list(map(len, graph_sets))
 
-    with open("output.txt", "a") as fp:
+    # ones = list(filter(lambda x: x == 1, set_lengths))
+    # twos = list(filter(lambda x: x == 2, set_lengths))
+    # threes = list(filter(lambda x: x == 3, set_lengths))
+
+    # pdb.set_trace()
+    # return
+
+    with open("{}_output.txt".format(dataset_name), "w") as fp:
         fp.write(str(args))
         fp.write('\n')
 
-    # load_data(args)
-    # return
-    dataset = None
+    if args.datafile:
+        load_data(args)
+        return
 
-    with open(args.dataset, 'rb') as f:
-        dataset = pickle.load(f)
+    dataset_training = None
+    with open(args.trainingdataset, 'rb') as f:
+        dataset_training = pickle.load(f)
+    
+    dataset_val = None
+    with open(args.valdataset, 'rb') as f:
+        dataset_val = pickle.load(f)
 
     ####### DATASET KEYS
     # 'labels': 1/-1,
@@ -172,7 +226,7 @@ def main(args):
     # 'tracklet_features': tracklet_features
 
 
-    training_set_limit = int(len(dataset['set_ids'])*0.9)
+    # training_set_limit = int(len(dataset['set_ids'])*0.85)
 
     training_graph_data = []
     training_tracklet_data = []
@@ -184,17 +238,27 @@ def main(args):
     test_graphs = []
     test_labels = []
 
-    for i in dataset['set_ids'][:training_set_limit]:
-        training_graphs.append(dataset['graphs'][i])
-        training_graph_data.append(dataset['graph_data'][i])
-        training_tracklet_data.append(dataset['tracklet_features'][i])
-        training_labels.append(dataset['labels'][i])
+    training_set_ids = dataset_training['set_ids']
+    random.shuffle(training_set_ids)
+    # test_set_ids = list(range(training_set_limit, len(dataset['set_ids'])))
+    test_set_ids = dataset_val['set_ids']
 
-    for i in dataset['set_ids'][training_set_limit:]:
-        test_graph_data.append(dataset['graph_data'][i])
-        test_tracklet_data.append(dataset['tracklet_features'][i])
-        test_graphs.append(dataset['graphs'][i])
-        test_labels.append(dataset['labels'][i])
+    # print(len(dataset_training['graphs']))
+    # print(len(dataset_val['graphs']))
+
+    for i in range(len(dataset_training['labels'])):
+        training_graphs.append(dataset_training['graphs'][i])
+        training_graph_data.append(dataset_training['graph_data'][i])
+        training_tracklet_data.append(dataset_training['tracklet_features'][i])
+        training_labels.append(dataset_training['labels'][i])
+
+    for i in range(len(dataset_val['labels'])):
+        test_graph_data.append(dataset_val['graph_data'][i])
+        test_tracklet_data.append(dataset_val['tracklet_features'][i])
+        test_graphs.append(dataset_val['graphs'][i])
+        test_labels.append(dataset_val['labels'][i])
+
+    print(len(training_labels), len(training_labels)/args.batchsize)
 
     training_labels = torch.FloatTensor(training_labels)
     training_graph_data = torch.FloatTensor(training_graph_data)
@@ -206,7 +270,7 @@ def main(args):
 
     train_loader = DataLoader(
         dataset=training_graphs,
-        batch_size=BATCH_SIZE,
+        batch_size=args.batchsize,
         collate_fn=batcher(device),
         shuffle=False,
         num_workers=0
@@ -214,7 +278,7 @@ def main(args):
 
     test_loader = DataLoader(
         dataset=test_graphs,
-        batch_size=BATCH_SIZE,
+        batch_size=args.batchsize,
         collate_fn=batcher(device),
         shuffle=False,
         num_workers=0
@@ -240,13 +304,17 @@ def main(args):
     
     # create model
 
-    # model = BCS()
-    model = torch.load("model.pt")
+    model = None
+    if os.path.exists("{}_model.pt".format(dataset_name)):
+        model = torch.load("{}_model.pt".format(dataset_name))
+    else:
+        model = BCS()
+    # model = torch.load("model.pt")
 
     if args.early_stop:
         stopper = EarlyStopping(patience=100)
     if cuda:
-        model.cuda()
+        model = model.cuda()
 
     loss_func = torch.nn.SoftMarginLoss()
     # loss_func = torch.nn.MultiMarginLoss()
@@ -258,10 +326,10 @@ def main(args):
     dur = []
     loss_values = []
     training_accuracy = []
-    test_accuracy = []
+    val_accuracy = []
     for epoch in range(args.epochs):
         training_accuracy.append([])
-        test_accuracy.append([])
+        val_accuracy.append([])
         loss_values.append([])
         total_count = 0
         # print(len(training_graphs), len(training_graph_data), len(training_tracklet_data))
@@ -272,19 +340,19 @@ def main(args):
         # forward
 
         for step, batch in enumerate(train_loader):
-            if len(training_graphs) < (step+1)*BATCH_SIZE:
+            if len(training_graphs) < (step+1)*args.batchsize:
                 continue
-            node_features = training_graph_data[step*BATCH_SIZE:min(len(training_graphs), (step+1)*BATCH_SIZE), :]
-            tracklet_features = training_tracklet_data[step*BATCH_SIZE:min(len(training_graphs), (step+1)*BATCH_SIZE), :]
+            node_features = training_graph_data[step*args.batchsize:min(len(training_graphs), (step+1)*args.batchsize), :]
+            tracklet_features = training_tracklet_data[step*args.batchsize:min(len(training_graphs), (step+1)*args.batchsize), :]
             logits = model(batch, node_features, tracklet_features)
-            loss = loss_func(logits, training_labels[step*BATCH_SIZE:min(len(training_graphs), (step+1)*BATCH_SIZE)])
+            loss = loss_func(logits, training_labels[step*args.batchsize:min(len(training_graphs), (step+1)*args.batchsize)])
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             training_accuracy[epoch].append(
-                accuracy(logits, training_labels[step*BATCH_SIZE:min(len(training_graphs), (step+1)*BATCH_SIZE)]))
+                accuracy(logits, training_labels[step*args.batchsize:min(len(training_graphs), (step+1)*args.batchsize)]))
             loss_values[epoch].append(loss.item())
 
             log_str = "Epoch {:05d} | Batch {:05d} | Loss {:.4f} | Acc {:.4f}\n".format(
@@ -295,18 +363,18 @@ def main(args):
                     )
 
             print(log_str.strip())
-            with open("output.txt", "a") as fp:
+            with open("{}_output.txt".format(dataset_name), "a") as fp:
                 fp.write(log_str)
 
         for step, batch in enumerate(test_loader):
-            if len(test_graphs) < (step+1)*BATCH_SIZE:
+            if len(test_graphs) < (step+1)*args.batchsize:
                 continue
-            node_features = test_graph_data[step*BATCH_SIZE:min(len(test_graphs), (step+1)*BATCH_SIZE), :]
-            tracklet_features = test_tracklet_data[step*BATCH_SIZE:min(len(test_graphs), (step+1)*BATCH_SIZE), :]
+            node_features = test_graph_data[step*args.batchsize:min(len(test_graphs), (step+1)*args.batchsize), :]
+            tracklet_features = test_tracklet_data[step*args.batchsize:min(len(test_graphs), (step+1)*args.batchsize), :]
             
-            test_accuracy[epoch].append(evaluate(
+            val_accuracy[epoch].append(evaluate(
                 model, 
-                test_labels[step*BATCH_SIZE:min(len(test_graphs), (step+1)*BATCH_SIZE)],
+                test_labels[step*args.batchsize:min(len(test_graphs), (step+1)*args.batchsize)],
                 batch,
                 node_features,
                 tracklet_features
@@ -326,24 +394,24 @@ def main(args):
         #             break
 
         train_acc = np.mean(training_accuracy[epoch])
-        test_acc = np.mean(test_accuracy[epoch])
+        val_acc = np.mean(val_accuracy[epoch])
 
-        print(train_acc, test_acc)
+        print(train_acc, val_acc)
 
-        if epoch%15 == 0:
-            torch.save(model, "model.pt")
+        if epoch%3 == 0 and val_acc > best_val_acc:
+            torch.save(model, "{}_model.pt".format(dataset_name))
 
         log_str = "Epoch {:05d} | Time(s) {:.4f} | Loss {:.4f} | TrainAcc {:.4f} | TestAcc {:.4f}\n".format(
             epoch, 
             np.mean(dur), 
             float(np.mean(loss_values[epoch])), 
             float(train_acc), 
-            float(test_acc)
+            float(val_acc)
         )
 
         print(log_str)
 
-        with open("output.txt", "a") as fp:
+        with open("{}_output.txt".format(dataset_name), "a") as fp:
             fp.write(log_str)
 
     print()
@@ -358,9 +426,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='GAT')
 
     parser.add_argument("--dataset", type=str, default='dataset.pickle')
+    parser.add_argument("--trainingdataset", type=str, default='tl120_iou0.85_d0.3_processed_training.pickle')
+    parser.add_argument("--valdataset", type=str, default='tl120_iou0.85_d0.3_processed_val.pickle')
     parser.add_argument("--output", type=str, default='dataset.pickle')
-    parser.add_argument("--datafile", type=str, default='.')
+    parser.add_argument("--datafile", type=str, default=None)
     parser.add_argument("--cams", type=int, nargs='+', default=[1, 8])
+    parser.add_argument("--nodes", type=int, default=12)
+    parser.add_argument("--batchsize", type=int, default=512)
 
     parser.add_argument("--gpu", type=int, default=-1,
                         help="which GPU to use. Set -1 to use CPU.")
